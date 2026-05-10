@@ -1,7 +1,7 @@
 """
 Healthcare Management System
 Databricks Custom App — Unity Catalog Edition
-CRUD via: Streamlit UI → SQL Warehouse → Unity Catalog Delta Tables
+Uses databricks-sdk (auto-auth inside Databricks Apps)
 """
 
 import os
@@ -9,45 +9,55 @@ import streamlit as st
 import pandas as pd
 import uuid
 from datetime import datetime, date, timedelta
-from databricks import sql as dbsql
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import StatementState, Disposition
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONNECTION  (env vars auto-injected by Databricks Apps runtime)
+# CONFIG — reads from app.yaml env vars
 # ─────────────────────────────────────────────────────────────────────────────
-HOST      = os.environ.get("DATABRICKS_HOST", "").replace("https://", "")
-HTTP_PATH = os.environ.get("DATABRICKS_HTTP_PATH", "")
-TOKEN     = os.environ.get("DATABRICKS_TOKEN", "")
-CATALOG   = os.environ.get("DATABRICKS_CATALOG", "main")
-SCHEMA    = os.environ.get("DATABRICKS_SCHEMA",  "healthcare_db")
-TBL       = lambda t: f"`{CATALOG}`.`{SCHEMA}`.`{t}`"
+HTTP_PATH    = os.environ.get("DATABRICKS_HTTP_PATH", "")
+WAREHOUSE_ID = HTTP_PATH.strip("/").split("/")[-1] if HTTP_PATH else ""
+CATALOG      = os.environ.get("DATABRICKS_CATALOG", "workspace")
+SCHEMA       = os.environ.get("DATABRICKS_SCHEMA",  "healthcare_db")
+TBL          = lambda t: f"`{CATALOG}`.`{SCHEMA}`.`{t}`"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# DATABRICKS SDK — auto-authenticates inside Databricks Apps
+# ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Connecting to Databricks…")
-def get_conn():
-    return dbsql.connect(
-        server_hostname=HOST,
-        http_path=HTTP_PATH,
-        access_token=TOKEN,
-        session_configuration={"spark.sql.ansi.enabled": "false"},
-    )
+def get_client():
+    return WorkspaceClient()
 
-def run_sql(sql: str, fetch: bool = False):
-    conn = get_conn()
+def run_sql(sql_str: str, fetch: bool = False):
     try:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            if fetch:
-                cols = [d[0] for d in cur.description]
-                rows = cur.fetchall()
-                return pd.DataFrame(rows, columns=cols)
-            return True
+        w   = get_client()
+        res = w.statement_execution.execute_statement(
+            warehouse_id=WAREHOUSE_ID,
+            statement=sql_str,
+            wait_timeout="50s",
+            disposition=Disposition.INLINE,
+        )
+        # Poll until done
+        while res.status.state in (StatementState.PENDING, StatementState.RUNNING):
+            res = w.statement_execution.get_statement(res.statement_id)
+
+        if res.status.state == StatementState.SUCCEEDED:
+            if fetch and res.result and res.result.data_array:
+                cols = [c.name for c in res.manifest.schema.columns]
+                return pd.DataFrame(res.result.data_array, columns=cols)
+            return pd.DataFrame() if fetch else True
+        else:
+            err = res.status.error.message if res.status.error else "Unknown error"
+            st.error(f"SQL error: {err}")
+            return pd.DataFrame() if fetch else False
     except Exception as e:
-        st.error(f"❌ SQL Error: {e}")
+        st.error(f"Connection error: {e}")
         return pd.DataFrame() if fetch else False
 
 def qdf(sql):  return run_sql(sql, fetch=True)
 def qrun(sql): return run_sql(sql, fetch=False)
 def esc(v):    return str(v).replace("'", "''") if v else ""
-def uid(p):    return f"{p}-{str(uuid.uuid4())[:6].upper()}"
+def new_id(p): return f"{p}-{str(uuid.uuid4())[:6].upper()}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
@@ -77,7 +87,6 @@ st.set_page_config(
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-
 html,body,[class*="css"],.stApp{font-family:'Plus Jakarta Sans',sans-serif!important}
 .stApp{background:#f0f2f6!important}
 
@@ -85,13 +94,12 @@ html,body,[class*="css"],.stApp{font-family:'Plus Jakarta Sans',sans-serif!impor
 [data-testid="stSidebar"] *{color:#b8c9e4!important}
 [data-testid="stSidebar"] .stRadio>label{display:none}
 [data-testid="stSidebar"] .stRadio div[role="radiogroup"]{display:flex;flex-direction:column;gap:2px}
-[data-testid="stSidebar"] .stRadio div[role="radiogroup"] label{padding:11px 18px!important;border-radius:10px!important;cursor:pointer!important;font-size:13.5px!important;font-weight:400!important;color:#8fa3c0!important;transition:all .2s!important}
+[data-testid="stSidebar"] .stRadio div[role="radiogroup"] label{padding:11px 18px!important;border-radius:10px!important;cursor:pointer!important;font-size:13.5px!important;color:#8fa3c0!important;transition:all .2s!important}
 [data-testid="stSidebar"] .stRadio div[role="radiogroup"] label:hover{background:rgba(255,255,255,.07)!important;color:#e2eaf5!important}
 [data-testid="stSidebarContent"] hr{border-color:rgba(255,255,255,.08)!important}
 
 .page-header{background:linear-gradient(135deg,#0a1628,#1a3356);border-radius:16px;padding:22px 28px;margin-bottom:24px;display:flex;align-items:center;gap:16px;border:1px solid rgba(255,255,255,.06)}
-.ph-icon{font-size:30px}
-.ph-title{font-size:20px;font-weight:600;color:#fff;letter-spacing:-.3px}
+.ph-icon{font-size:30px}.ph-title{font-size:20px;font-weight:600;color:#fff;letter-spacing:-.3px}
 .ph-sub{font-size:13px;color:#64a0d4;margin-top:3px}
 .ph-badge{display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.1);border-radius:20px;padding:4px 12px;font-size:11px;color:#93c5fd;margin-top:8px}
 
@@ -108,33 +116,30 @@ html,body,[class*="css"],.stApp{font-family:'Plus Jakarta Sans',sans-serif!impor
 .metric-value{font-size:36px;font-weight:700;color:#0f172a;line-height:1.1;margin-top:4px}
 
 .section-card{background:#fff;border-radius:16px;border:1px solid #e8ecf3;overflow:hidden;margin-bottom:20px}
-.section-card-header{padding:16px 22px;border-bottom:1px solid #f1f5f9;font-size:14px;font-weight:600;color:#1e293b;display:flex;align-items:center;gap:8px;background:#fafbfc}
+.section-card-header{padding:16px 22px;border-bottom:1px solid #f1f5f9;font-size:14px;font-weight:600;color:#1e293b;background:#fafbfc}
 .section-card-body{padding:20px 22px}
-
 .form-wrapper{background:#fff;border-radius:16px;padding:24px 26px;border:1px solid #e8ecf3;margin-bottom:16px}
 
 .stButton>button{border-radius:10px!important;font-family:'Plus Jakarta Sans',sans-serif!important;font-weight:600!important;font-size:13.5px!important;height:42px!important;transition:all .2s!important}
 .stButton>button[kind="primary"]{background:linear-gradient(135deg,#0a1628,#1a3356)!important;border:none!important;box-shadow:0 2px 8px rgba(10,22,40,.25)!important}
 .stButton>button[kind="primary"]:hover{transform:translateY(-1px)!important;box-shadow:0 6px 18px rgba(10,22,40,.3)!important}
-.stButton>button[kind="secondary"]{border-color:#e2e8f0!important;color:#475569!important}
 
 .stTabs [data-baseweb="tab-list"]{background:#f8f9fc;border-radius:12px;padding:5px 6px;gap:3px;border:1px solid #e8ecf3;margin-bottom:20px}
-.stTabs [data-baseweb="tab"]{border-radius:9px!important;font-size:13px!important;font-weight:500!important;padding:8px 18px!important;color:#64748b!important;transition:all .15s!important}
+.stTabs [data-baseweb="tab"]{border-radius:9px!important;font-size:13px!important;font-weight:500!important;padding:8px 18px!important;color:#64748b!important}
 .stTabs [aria-selected="true"]{background:#0a1628!important;color:#fff!important;box-shadow:0 2px 8px rgba(10,22,40,.2)!important}
 
 .stTextInput input,.stTextArea textarea,.stSelectbox>div>div,.stNumberInput input,.stDateInput input{border-radius:10px!important;border-color:#dde2ed!important;font-family:'Plus Jakarta Sans',sans-serif!important;font-size:13.5px!important;background:#fafbfc!important}
-.stTextInput input:focus,.stTextArea textarea:focus{border-color:#2563eb!important;background:#fff!important;box-shadow:0 0 0 3px rgba(37,99,235,.1)!important}
 
 .ok-box{background:#f0fdf4;border:1px solid #86efac;border-radius:12px;padding:12px 18px;color:#15803d;font-weight:600;font-size:13.5px;display:flex;align-items:center;gap:8px;margin:10px 0}
 .err-box{background:#fff1f2;border:1px solid #fca5a5;border-radius:12px;padding:12px 18px;color:#b91c1c;font-weight:600;font-size:13.5px;display:flex;align-items:center;gap:8px;margin:10px 0}
 .info-box{background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:12px 18px;color:#1d4ed8;font-size:13px;margin:10px 0;line-height:1.5}
 
 [data-testid="stDataFrame"]{border-radius:12px!important;overflow:hidden!important;border:1px solid #e8ecf3!important}
-[data-testid="stDataFrame"] thead th{background:#0a1628!important;color:#fff!important;font-size:12px!important;font-weight:600!important;letter-spacing:.4px!important;text-transform:uppercase!important;padding:12px 16px!important}
+[data-testid="stDataFrame"] thead th{background:#0a1628!important;color:#fff!important;font-size:12px!important;font-weight:600!important;text-transform:uppercase!important;padding:12px 16px!important}
 [data-testid="stDataFrame"] tbody tr:nth-child(even){background:#f8fafc!important}
 [data-testid="stDataFrame"] tbody tr:hover{background:#eff6ff!important}
 
-.stTextInput label,.stTextArea label,.stSelectbox label,.stNumberInput label,.stDateInput label,.stTimeInput label{font-size:13px!important;font-weight:600!important;color:#374151!important;letter-spacing:.1px!important}
+.stTextInput label,.stTextArea label,.stSelectbox label,.stNumberInput label,.stDateInput label{font-size:13px!important;font-weight:600!important;color:#374151!important}
 hr{border-color:#e8ecf3!important;margin:20px 0!important}
 </style>
 """, unsafe_allow_html=True)
@@ -151,11 +156,8 @@ def page_header(icon, title, sub, badge=None):
     st.markdown(f"""
     <div class="page-header">
         <div class="ph-icon">{icon}</div>
-        <div>
-            <div class="ph-title">{title}</div>
-            <div class="ph-sub">{sub}</div>
-            {b}
-        </div>
+        <div><div class="ph-title">{title}</div>
+        <div class="ph-sub">{sub}</div>{b}</div>
     </div>""", unsafe_allow_html=True)
 
 def patient_exists(pid):
@@ -170,8 +172,7 @@ with st.sidebar:
     <div style="padding:24px 20px 16px">
         <div style="font-size:24px;font-weight:700;color:#fff;letter-spacing:-.5px">🏥 HMS</div>
         <div style="font-size:11px;color:#4a6fa5;margin-top:5px;font-weight:500;text-transform:uppercase;letter-spacing:.5px">Healthcare Management</div>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
     st.markdown("---")
 
     page = st.radio("", [
@@ -187,33 +188,28 @@ with st.sidebar:
     <div style="padding:0 8px">
         <div style="font-size:10px;color:#334e72;text-transform:uppercase;letter-spacing:.8px;font-weight:600;margin-bottom:10px">Unity Catalog</div>
         <div style="background:rgba(255,255,255,.05);border-radius:10px;padding:12px 14px;border:1px solid rgba(255,255,255,.06)">
-            <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#60a5fa;margin-bottom:6px">{CATALOG}.{SCHEMA}</div>
-            <div style="font-size:11px;color:#334e72">Delta tables · persistent</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#60a5fa;margin-bottom:4px">{CATALOG}.{SCHEMA}</div>
+            <div style="font-size:11px;color:#334e72">Warehouse ID: {WAREHOUSE_ID[:8]}...</div>
         </div>
-        <div style="margin-top:10px;display:flex;flex-direction:column;gap:4px">
-            {''.join([f'<div style="font-size:11px;color:#334e72">· {t}</div>' for t in ['patients','appointments','medical_records','medications']])}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # DASHBOARD
 # ═════════════════════════════════════════════════════════════════════════════
 if "Dashboard" in page:
-    page_header("📊", "Dashboard", "Live overview from Unity Catalog tables",
+    page_header("📊", "Dashboard", "Live data from Unity Catalog tables",
                 f"{CATALOG}.{SCHEMA}")
 
     today = str(date.today())
+    r_p = qdf(f"SELECT COUNT(*) AS n FROM {TBL('patients')}")
+    r_a = qdf(f"SELECT COUNT(*) AS n FROM {TBL('appointments')} WHERE appt_date='{today}'")
+    r_r = qdf(f"SELECT COUNT(*) AS n FROM {TBL('medical_records')}")
+    r_m = qdf(f"SELECT COUNT(*) AS n FROM {TBL('medications')} WHERE status='Active'")
 
-    r_patients  = qdf(f"SELECT COUNT(*) AS n FROM {TBL('patients')}")
-    r_today     = qdf(f"SELECT COUNT(*) AS n FROM {TBL('appointments')} WHERE appt_date='{today}'")
-    r_records   = qdf(f"SELECT COUNT(*) AS n FROM {TBL('medical_records')}")
-    r_meds      = qdf(f"SELECT COUNT(*) AS n FROM {TBL('medications')} WHERE status='Active'")
-
-    n_p = int(r_patients['n'][0]) if not r_patients.empty else 0
-    n_a = int(r_today['n'][0])    if not r_today.empty    else 0
-    n_r = int(r_records['n'][0])  if not r_records.empty  else 0
-    n_m = int(r_meds['n'][0])     if not r_meds.empty     else 0
+    n_p = int(r_p['n'][0]) if not r_p.empty else 0
+    n_a = int(r_a['n'][0]) if not r_a.empty else 0
+    n_r = int(r_r['n'][0]) if not r_r.empty else 0
+    n_m = int(r_m['n'][0]) if not r_m.empty else 0
 
     st.markdown(f"""
     <div class="metrics-row">
@@ -274,7 +270,6 @@ elif "Patients" in page:
 
     tab_c, tab_r, tab_u, tab_d = st.tabs(["➕  Create", "🔍  Read / Search", "✏️  Update", "🗑️  Delete"])
 
-    # ── CREATE ────────────────────────────────────────────────────────────────
     with tab_c:
         st.markdown('<div class="form-wrapper">', unsafe_allow_html=True)
         st.markdown("#### 📋 Register New Patient")
@@ -291,37 +286,33 @@ elif "Patients" in page:
             p_email = st.text_input("Email Address")
             p_addr  = st.text_area("Address", height=72)
         c3, c4 = st.columns(2, gap="large")
-        with c3: p_emerg   = st.text_input("Emergency Contact (Name · Phone)")
-        with c4: p_allergy = st.text_input("Known Allergies", placeholder="e.g. Penicillin, Sulfa drugs")
+        with c3: p_emerg   = st.text_input("Emergency Contact")
+        with c4: p_allergy = st.text_input("Known Allergies", placeholder="e.g. Penicillin")
         st.markdown('</div>', unsafe_allow_html=True)
 
         if st.button("🏥  Register Patient", type="primary", use_container_width=True):
             if not p_fn.strip() or not p_ln.strip():
                 err("First Name and Last Name are required.")
             else:
-                new_id = uid("PT")
+                pid = new_id("PT")
                 sql = f"""INSERT INTO {TBL('patients')} VALUES (
-                    '{new_id}','{esc(p_fn)}','{esc(p_ln)}','{p_dob}','{p_gen}',
-                    '{p_blood}','{esc(p_phone)}','{esc(p_email)}','{esc(p_addr)}',
-                    '{esc(p_emerg)}','{esc(p_allergy)}', current_timestamp()
-                )"""
-                if qrun(sql):
-                    ok(f"Patient **{p_fn} {p_ln}** registered! &nbsp; ID: `{new_id}`")
+                    '{pid}','{esc(p_fn)}','{esc(p_ln)}','{p_dob}','{p_gen}',
+                    '{p_blood}','{esc(p_phone)}','{esc(p_email)}',
+                    '{esc(p_addr)}','{esc(p_emerg)}','{esc(p_allergy)}',
+                    current_timestamp())"""
+                if qrun(sql): ok(f"Patient **{p_fn} {p_ln}** registered! ID: `{pid}`")
 
-    # ── READ ──────────────────────────────────────────────────────────────────
     with tab_r:
         c1, c2 = st.columns([4,1], gap="medium")
-        with c1: srch = st.text_input("🔍 Search by name, patient ID or phone")
+        with c1: srch = st.text_input("🔍 Search by name, ID or phone")
         with c2: lim  = st.selectbox("Show", [10,25,50,100])
-
         where = ""
         if srch.strip():
             s = esc(srch.strip())
             where = f"WHERE patient_id LIKE '%{s}%' OR first_name LIKE '%{s}%' OR last_name LIKE '%{s}%' OR phone LIKE '%{s}%'"
-
-        df = qdf(f"""SELECT patient_id AS 'ID', first_name AS 'First Name', last_name AS 'Last Name',
-                         dob AS 'DOB', gender AS 'Gender', blood_type AS 'Blood',
-                         phone AS 'Phone', email AS 'Email', allergies AS 'Allergies'
+        df = qdf(f"""SELECT patient_id AS ID, first_name AS 'First Name', last_name AS 'Last Name',
+                         dob AS DOB, gender AS Gender, blood_type AS Blood,
+                         phone AS Phone, email AS Email, allergies AS Allergies
                      FROM {TBL('patients')} {where}
                      ORDER BY created_at DESC LIMIT {lim}""")
         if not df.empty:
@@ -330,42 +321,38 @@ elif "Patients" in page:
         else:
             st.info("No patients found.")
 
-    # ── UPDATE ────────────────────────────────────────────────────────────────
     with tab_u:
-        upd_id = st.text_input("Enter Patient ID to edit (e.g. PT-001)")
-        if upd_id.strip():
-            df = qdf(f"SELECT * FROM {TBL('patients')} WHERE patient_id='{esc(upd_id.strip())}' LIMIT 1")
+        upd = st.text_input("Enter Patient ID to edit (e.g. PT-001)")
+        if upd.strip():
+            df = qdf(f"SELECT * FROM {TBL('patients')} WHERE patient_id='{esc(upd.strip())}' LIMIT 1")
             if not df.empty:
                 r = df.iloc[0]
-                info(f"Editing: **{r['first_name']} {r['last_name']}** &nbsp;|&nbsp; Blood: {r['blood_type']} &nbsp;|&nbsp; DOB: {r['dob']}")
+                info(f"Editing: **{r['first_name']} {r['last_name']}** | Blood: {r['blood_type']} | DOB: {r['dob']}")
                 st.markdown('<div class="form-wrapper">', unsafe_allow_html=True)
                 c1, c2 = st.columns(2, gap="large")
                 with c1:
-                    u_fn  = st.text_input("First Name", value=str(r['first_name'] or ""))
-                    u_ph  = st.text_input("Phone",      value=str(r['phone'] or ""))
-                    u_bt  = st.selectbox("Blood Type", BLOOD_TYPES,
-                                         index=BLOOD_TYPES.index(r['blood_type']) if r['blood_type'] in BLOOD_TYPES else 8)
+                    u_fn = st.text_input("First Name", value=str(r['first_name'] or ""))
+                    u_ph = st.text_input("Phone",      value=str(r['phone'] or ""))
+                    u_bt = st.selectbox("Blood Type", BLOOD_TYPES, index=BLOOD_TYPES.index(r['blood_type']) if r['blood_type'] in BLOOD_TYPES else 8)
                 with c2:
-                    u_ln  = st.text_input("Last Name",  value=str(r['last_name'] or ""))
-                    u_em  = st.text_input("Email",      value=str(r['email'] or ""))
-                    u_ad  = st.text_area("Address",     value=str(r['address'] or ""), height=72)
+                    u_ln = st.text_input("Last Name",  value=str(r['last_name'] or ""))
+                    u_em = st.text_input("Email",      value=str(r['email'] or ""))
+                    u_ad = st.text_area("Address",     value=str(r['address'] or ""), height=72)
                 c3, c4 = st.columns(2, gap="large")
                 with c3: u_al = st.text_input("Allergies",         value=str(r['allergies'] or ""))
                 with c4: u_ec = st.text_input("Emergency Contact", value=str(r['emergency'] or ""))
                 st.markdown('</div>', unsafe_allow_html=True)
-
                 if st.button("💾  Save Changes", type="primary", use_container_width=True):
                     sql = f"""UPDATE {TBL('patients')} SET
-                        first_name='{esc(u_fn)}', last_name='{esc(u_ln)}',
-                        phone='{esc(u_ph)}', email='{esc(u_em)}',
-                        blood_type='{u_bt}', address='{esc(u_ad)}',
-                        allergies='{esc(u_al)}', emergency='{esc(u_ec)}'
-                        WHERE patient_id='{esc(upd_id.strip())}'"""
-                    if qrun(sql): ok("Patient record updated successfully!")
+                        first_name='{esc(u_fn)}',last_name='{esc(u_ln)}',
+                        phone='{esc(u_ph)}',email='{esc(u_em)}',
+                        blood_type='{u_bt}',address='{esc(u_ad)}',
+                        allergies='{esc(u_al)}',emergency='{esc(u_ec)}'
+                        WHERE patient_id='{esc(upd.strip())}'"""
+                    if qrun(sql): ok("Patient updated successfully!")
             else:
-                err(f"No patient found with ID: `{upd_id.strip()}`")
+                err(f"No patient found with ID: `{upd.strip()}`")
 
-    # ── DELETE ────────────────────────────────────────────────────────────────
     with tab_d:
         st.warning("⚠️ Deleting a patient also removes their appointments, records and medications.")
         del_id = st.text_input("Enter Patient ID to delete")
@@ -373,14 +360,14 @@ elif "Patients" in page:
             df = qdf(f"SELECT * FROM {TBL('patients')} WHERE patient_id='{esc(del_id.strip())}' LIMIT 1")
             if not df.empty:
                 r = df.iloc[0]
-                info(f"**{r['first_name']} {r['last_name']}** &nbsp;|&nbsp; DOB: {r['dob']} &nbsp;|&nbsp; Blood: {r['blood_type']} &nbsp;|&nbsp; Phone: {r['phone']}")
+                info(f"**{r['first_name']} {r['last_name']}** | DOB: {r['dob']} | Blood: {r['blood_type']}")
                 confirm = st.checkbox("I confirm permanent deletion of this patient and all their data")
                 if confirm and st.button("🗑️  Delete Patient", type="primary", use_container_width=True):
                     pid = esc(del_id.strip())
                     for t in ["medications","medical_records","appointments"]:
                         qrun(f"DELETE FROM {TBL(t)} WHERE patient_id='{pid}'")
-                    if qrun(f"DELETE FROM {TBL('patients')} WHERE patient_id='{pid}'"):
-                        ok(f"Patient `{del_id.strip()}` and all related records deleted.")
+                    if qrun(f"DELETE FROM {TBL('patients')} WHERE patient_id='{pid}'"): 
+                        ok(f"Patient `{del_id.strip()}` deleted.")
             else:
                 err(f"No patient found with ID: `{del_id.strip()}`")
 
@@ -407,7 +394,7 @@ elif "Appointments" in page:
             a_dept = st.selectbox("Department *", DEPARTMENTS)
             a_time = st.time_input("Time *", value=datetime.strptime("09:00","%H:%M").time())
             a_stat = st.selectbox("Status", APPT_STATUS)
-            a_fee  = st.number_input("Consultation Fee (₹)", min_value=0, value=500, step=50)
+            a_fee  = st.number_input("Fee (₹)", min_value=0, value=500, step=50)
         a_notes = st.text_area("Notes / Chief Complaint", height=80)
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -415,46 +402,41 @@ elif "Appointments" in page:
             if not a_pid.strip():
                 err("Patient ID is required.")
             elif not patient_exists(a_pid.strip()):
-                err(f"Patient `{a_pid.strip()}` not found. Register them first under 👤 Patients.")
+                err(f"Patient `{a_pid.strip()}` not found.")
             else:
-                new_id = uid("APT")
+                aid = new_id("APT")
                 sql = f"""INSERT INTO {TBL('appointments')} VALUES (
-                    '{new_id}','{esc(a_pid)}','{a_doc}','{a_dept}',
+                    '{aid}','{esc(a_pid)}','{a_doc}','{a_dept}',
                     '{a_date}','{a_time}','{a_type}','{a_stat}',
-                    {a_fee},'{esc(a_notes)}', current_timestamp()
-                )"""
-                if qrun(sql): ok(f"Appointment scheduled! &nbsp;ID: `{new_id}` &nbsp;| {a_doc} | {a_date}")
+                    {a_fee},'{esc(a_notes)}',current_timestamp())"""
+                if qrun(sql): ok(f"Appointment scheduled! ID: `{aid}`")
 
     with tab_r:
         c1, c2, c3 = st.columns(3, gap="medium")
         with c1: f_pid  = st.text_input("Filter by Patient ID")
         with c2: f_doc  = st.selectbox("Filter by Doctor", ["All"]+DOCTORS)
         with c3: f_stat = st.selectbox("Filter by Status", ["All"]+APPT_STATUS)
-
         conds = ["1=1"]
         if f_pid.strip():   conds.append(f"patient_id='{esc(f_pid.strip())}'")
         if f_doc  != "All": conds.append(f"doctor='{f_doc}'")
         if f_stat != "All": conds.append(f"status='{f_stat}'")
-        where = "WHERE " + " AND ".join(conds)
-
         df = qdf(f"""SELECT appt_id AS ID, patient_id AS Patient, doctor AS Doctor,
                          department AS Dept, appt_date AS Date, appt_time AS Time,
                          appt_type AS Type, status AS Status, fee AS 'Fee ₹'
-                     FROM {TBL('appointments')} {where}
+                     FROM {TBL('appointments')} WHERE {' AND '.join(conds)}
                      ORDER BY appt_date DESC LIMIT 100""")
         if not df.empty:
             st.success(f"Found **{len(df)}** appointment(s)")
             st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No appointments found.")
+        else: st.info("No appointments found.")
 
     with tab_u:
-        upd_id = st.text_input("Enter Appointment ID (e.g. APT-001)")
-        if upd_id.strip():
-            df = qdf(f"SELECT * FROM {TBL('appointments')} WHERE appt_id='{esc(upd_id.strip())}' LIMIT 1")
+        upd = st.text_input("Enter Appointment ID (e.g. APT-001)")
+        if upd.strip():
+            df = qdf(f"SELECT * FROM {TBL('appointments')} WHERE appt_id='{esc(upd.strip())}' LIMIT 1")
             if not df.empty:
                 r = df.iloc[0]
-                info(f"**{r['appt_id']}** &nbsp;|&nbsp; Patient: {r['patient_id']} &nbsp;|&nbsp; Doctor: {r['doctor']} &nbsp;|&nbsp; Date: {r['appt_date']}")
+                info(f"**{r['appt_id']}** | Patient: {r['patient_id']} | Doctor: {r['doctor']} | Date: {r['appt_date']}")
                 st.markdown('<div class="form-wrapper">', unsafe_allow_html=True)
                 c1, c2 = st.columns(2, gap="large")
                 with c1:
@@ -467,13 +449,11 @@ elif "Appointments" in page:
                 u_notes = st.text_area("Notes", value=str(r['notes'] or ""), height=80)
                 st.markdown('</div>', unsafe_allow_html=True)
                 if st.button("💾  Update Appointment", type="primary", use_container_width=True):
-                    sql = f"""UPDATE {TBL('appointments')} SET
-                        doctor='{u_doc}', department='{u_dept}', appt_date='{u_date}',
-                        status='{u_stat}', fee={u_fee}, notes='{esc(u_notes)}'
-                        WHERE appt_id='{esc(upd_id.strip())}'"""
+                    sql = f"""UPDATE {TBL('appointments')} SET doctor='{u_doc}',department='{u_dept}',
+                        appt_date='{u_date}',status='{u_stat}',fee={u_fee},notes='{esc(u_notes)}'
+                        WHERE appt_id='{esc(upd.strip())}'"""
                     if qrun(sql): ok("Appointment updated!")
-            else:
-                err(f"Appointment `{upd_id.strip()}` not found.")
+            else: err(f"Appointment `{upd.strip()}` not found.")
 
     with tab_d:
         del_id = st.text_input("Enter Appointment ID to delete")
@@ -481,12 +461,11 @@ elif "Appointments" in page:
             df = qdf(f"SELECT * FROM {TBL('appointments')} WHERE appt_id='{esc(del_id.strip())}' LIMIT 1")
             if not df.empty:
                 r = df.iloc[0]
-                info(f"**{r['appt_id']}** &nbsp;|&nbsp; Patient: {r['patient_id']} &nbsp;|&nbsp; Doctor: {r['doctor']} &nbsp;|&nbsp; Date: {r['appt_date']} &nbsp;|&nbsp; Status: {r['status']}")
+                info(f"**{r['appt_id']}** | Patient: {r['patient_id']} | Doctor: {r['doctor']} | Status: {r['status']}")
                 if st.button("🗑️  Delete Appointment", type="primary", use_container_width=True):
                     if qrun(f"DELETE FROM {TBL('appointments')} WHERE appt_id='{esc(del_id.strip())}'"):
                         ok(f"Appointment `{del_id.strip()}` deleted.")
-            else:
-                err(f"Appointment `{del_id.strip()}` not found.")
+            else: err(f"Appointment `{del_id.strip()}` not found.")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # MEDICAL RECORDS
@@ -510,7 +489,7 @@ elif "Medical" in page:
         with c2:
             r_aid  = st.text_input("Appointment ID (optional)")
             r_bp   = st.text_input("Blood Pressure", placeholder="e.g. 120/80")
-            r_temp = st.text_input("Temperature (°F)", placeholder="e.g. 98.6")
+            r_temp = st.text_input("Temperature (°F)")
             r_wt   = st.number_input("Weight (kg)", min_value=0.0, max_value=300.0, step=0.5)
         r_sym  = st.text_area("Symptoms", height=72)
         r_rx   = st.text_area("Prescription / Treatment Plan", height=72)
@@ -524,64 +503,58 @@ elif "Medical" in page:
             elif not patient_exists(r_pid.strip()):
                 err(f"Patient `{r_pid.strip()}` not found.")
             else:
-                new_id = uid("REC")
+                rid = new_id("REC")
                 sql = f"""INSERT INTO {TBL('medical_records')} VALUES (
-                    '{new_id}','{esc(r_pid)}','{esc(r_aid)}','{esc(r_doc)}',
+                    '{rid}','{esc(r_pid)}','{esc(r_aid)}','{esc(r_doc)}',
                     '{r_date}','{esc(r_diag)}','{esc(r_sym)}','{esc(r_rx)}',
                     '{esc(r_bp)}','{esc(r_temp)}',{r_wt},'{esc(r_note)}',
-                    '{r_fup}', current_timestamp()
-                )"""
-                if qrun(sql): ok(f"Medical record saved! &nbsp;ID: `{new_id}`")
+                    '{r_fup}',current_timestamp())"""
+                if qrun(sql): ok(f"Record saved! ID: `{rid}`")
 
     with tab_r:
         c1, c2 = st.columns(2, gap="medium")
         with c1: s_pid = st.text_input("Filter by Patient ID")
         with c2: s_doc = st.text_input("Filter by Doctor")
-
         conds = ["1=1"]
         if s_pid.strip(): conds.append(f"patient_id='{esc(s_pid.strip())}'")
         if s_doc.strip(): conds.append(f"doctor LIKE '%{esc(s_doc.strip())}%'")
-        where = "WHERE " + " AND ".join(conds)
-
         df = qdf(f"""SELECT record_id AS ID, patient_id AS Patient, doctor AS Doctor,
                          visit_date AS 'Visit Date', diagnosis AS Diagnosis,
                          bp AS BP, weight AS 'Wt(kg)', follow_up AS 'Follow-up'
-                     FROM {TBL('medical_records')} {where}
+                     FROM {TBL('medical_records')} WHERE {' AND '.join(conds)}
                      ORDER BY visit_date DESC LIMIT 100""")
         if not df.empty:
             st.success(f"Found **{len(df)}** record(s)")
             st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No records found.")
+        else: st.info("No records found.")
 
     with tab_u:
-        upd_id = st.text_input("Enter Record ID (e.g. REC-001)")
-        if upd_id.strip():
-            df = qdf(f"SELECT * FROM {TBL('medical_records')} WHERE record_id='{esc(upd_id.strip())}' LIMIT 1")
+        upd = st.text_input("Enter Record ID (e.g. REC-001)")
+        if upd.strip():
+            df = qdf(f"SELECT * FROM {TBL('medical_records')} WHERE record_id='{esc(upd.strip())}' LIMIT 1")
             if not df.empty:
                 r = df.iloc[0]
-                info(f"**{r['record_id']}** &nbsp;|&nbsp; Patient: {r['patient_id']} &nbsp;|&nbsp; Doctor: {r['doctor']} &nbsp;|&nbsp; Visit: {r['visit_date']}")
+                info(f"**{r['record_id']}** | Patient: {r['patient_id']} | Doctor: {r['doctor']}")
                 st.markdown('<div class="form-wrapper">', unsafe_allow_html=True)
-                u_diag = st.text_area("Diagnosis",              value=str(r['diagnosis'] or ""), height=80)
-                u_rx   = st.text_area("Prescription/Treatment", value=str(r['prescription'] or ""), height=80)
+                u_diag = st.text_area("Diagnosis",    value=str(r['diagnosis'] or ""), height=80)
+                u_rx   = st.text_area("Prescription", value=str(r['prescription'] or ""), height=80)
                 c1, c2 = st.columns(2, gap="large")
                 with c1:
-                    u_bp   = st.text_input("Blood Pressure", value=str(r['bp'] or ""))
-                    u_wt   = st.number_input("Weight (kg)",  value=float(r['weight'] or 0), step=0.5)
+                    u_bp  = st.text_input("Blood Pressure", value=str(r['bp'] or ""))
+                    u_wt  = st.number_input("Weight (kg)", value=float(r['weight'] or 0), step=0.5)
                 with c2:
-                    u_temp = st.text_input("Temperature",    value=str(r['temp'] or ""))
+                    u_temp = st.text_input("Temperature", value=str(r['temp'] or ""))
                     u_fup  = st.date_input("Follow-up Date")
-                u_note = st.text_area("Doctor's Notes", value=str(r['notes'] or ""), height=80)
+                u_note = st.text_area("Notes", value=str(r['notes'] or ""), height=80)
                 st.markdown('</div>', unsafe_allow_html=True)
                 if st.button("💾  Update Record", type="primary", use_container_width=True):
                     sql = f"""UPDATE {TBL('medical_records')} SET
-                        diagnosis='{esc(u_diag)}', prescription='{esc(u_rx)}',
-                        bp='{esc(u_bp)}', temp='{esc(u_temp)}',
-                        weight={u_wt}, notes='{esc(u_note)}', follow_up='{u_fup}'
-                        WHERE record_id='{esc(upd_id.strip())}'"""
-                    if qrun(sql): ok("Medical record updated!")
-            else:
-                err(f"Record `{upd_id.strip()}` not found.")
+                        diagnosis='{esc(u_diag)}',prescription='{esc(u_rx)}',
+                        bp='{esc(u_bp)}',temp='{esc(u_temp)}',
+                        weight={u_wt},notes='{esc(u_note)}',follow_up='{u_fup}'
+                        WHERE record_id='{esc(upd.strip())}'"""
+                    if qrun(sql): ok("Record updated!")
+            else: err(f"Record `{upd.strip()}` not found.")
 
     with tab_d:
         del_id = st.text_input("Enter Record ID to delete")
@@ -589,12 +562,11 @@ elif "Medical" in page:
             df = qdf(f"SELECT * FROM {TBL('medical_records')} WHERE record_id='{esc(del_id.strip())}' LIMIT 1")
             if not df.empty:
                 r = df.iloc[0]
-                info(f"**{r['record_id']}** &nbsp;|&nbsp; Patient: {r['patient_id']} &nbsp;|&nbsp; Diagnosis: {str(r['diagnosis'] or '')[:60]}...")
+                info(f"**{r['record_id']}** | Patient: {r['patient_id']} | Diagnosis: {str(r['diagnosis'] or '')[:60]}")
                 if st.button("🗑️  Delete Record", type="primary", use_container_width=True):
                     if qrun(f"DELETE FROM {TBL('medical_records')} WHERE record_id='{esc(del_id.strip())}'"):
                         ok(f"Record `{del_id.strip()}` deleted.")
-            else:
-                err(f"Record `{del_id.strip()}` not found.")
+            else: err(f"Record `{del_id.strip()}` not found.")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # MEDICATIONS
@@ -611,15 +583,15 @@ elif "Medications" in page:
         st.markdown("")
         c1, c2 = st.columns(2, gap="large")
         with c1:
-            m_pid   = st.text_input("Patient ID *",       placeholder="e.g. PT-001")
-            m_name  = st.text_input("Medication Name *",  placeholder="e.g. Amlodipine")
-            m_dos   = st.text_input("Dosage",             placeholder="e.g. 5mg")
-            m_freq  = st.selectbox("Frequency", FREQUENCIES)
+            m_pid  = st.text_input("Patient ID *",      placeholder="e.g. PT-001")
+            m_name = st.text_input("Medication Name *",  placeholder="e.g. Amlodipine")
+            m_dos  = st.text_input("Dosage",             placeholder="e.g. 5mg")
+            m_freq = st.selectbox("Frequency", FREQUENCIES)
         with c2:
-            m_rid   = st.text_input("Medical Record ID (optional)")
-            m_doc   = st.text_input("Prescribed By *",    placeholder="e.g. Dr. Anil Kumar")
-            m_start = st.date_input("Start Date", value=date.today())
-            m_end   = st.date_input("End Date",   value=date.today()+timedelta(30))
+            m_rid  = st.text_input("Record ID (optional)")
+            m_doc  = st.text_input("Prescribed By *",   placeholder="e.g. Dr. Anil Kumar")
+            m_start= st.date_input("Start Date", value=date.today())
+            m_end  = st.date_input("End Date",   value=date.today()+timedelta(30))
         m_inst = st.text_area("Special Instructions", height=72)
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -631,63 +603,55 @@ elif "Medications" in page:
             elif m_end < m_start:
                 err("End Date cannot be before Start Date.")
             else:
-                new_id = uid("MED")
+                mid = new_id("MED")
                 sql = f"""INSERT INTO {TBL('medications')} VALUES (
-                    '{new_id}','{esc(m_pid)}','{esc(m_rid)}','{esc(m_name)}',
+                    '{mid}','{esc(m_pid)}','{esc(m_rid)}','{esc(m_name)}',
                     '{esc(m_dos)}','{m_freq}','{esc(m_doc)}',
-                    '{m_start}','{m_end}','{esc(m_inst)}','Active', current_timestamp()
-                )"""
-                if qrun(sql): ok(f"Medication added! &nbsp;ID: `{new_id}` &nbsp;| {m_name} {m_dos} — {m_freq}")
+                    '{m_start}','{m_end}','{esc(m_inst)}','Active',
+                    current_timestamp())"""
+                if qrun(sql): ok(f"Medication added! ID: `{mid}`")
 
     with tab_r:
         c1, c2 = st.columns(2, gap="medium")
         with c1: mf_pid  = st.text_input("Filter by Patient ID")
         with c2: mf_stat = st.selectbox("Filter by Status", ["All"]+MED_STATUS)
-
         conds = ["1=1"]
-        if mf_pid.strip():     conds.append(f"patient_id='{esc(mf_pid.strip())}'")
-        if mf_stat != "All":   conds.append(f"status='{mf_stat}'")
-        where = "WHERE " + " AND ".join(conds)
-
+        if mf_pid.strip():   conds.append(f"patient_id='{esc(mf_pid.strip())}'")
+        if mf_stat != "All": conds.append(f"status='{mf_stat}'")
         df = qdf(f"""SELECT med_id AS ID, patient_id AS Patient, med_name AS Medication,
                          dosage AS Dose, frequency AS Frequency, prescribed_by AS 'Prescribed By',
                          start_date AS Start, end_date AS End, status AS Status
-                     FROM {TBL('medications')} {where}
+                     FROM {TBL('medications')} WHERE {' AND '.join(conds)}
                      ORDER BY created_at DESC LIMIT 100""")
         if not df.empty:
             st.success(f"Found **{len(df)}** medication(s)")
             st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No medications found.")
+        else: st.info("No medications found.")
 
     with tab_u:
-        upd_id = st.text_input("Enter Medication ID (e.g. MED-001)")
-        if upd_id.strip():
-            df = qdf(f"SELECT * FROM {TBL('medications')} WHERE med_id='{esc(upd_id.strip())}' LIMIT 1")
+        upd = st.text_input("Enter Medication ID (e.g. MED-001)")
+        if upd.strip():
+            df = qdf(f"SELECT * FROM {TBL('medications')} WHERE med_id='{esc(upd.strip())}' LIMIT 1")
             if not df.empty:
                 r = df.iloc[0]
-                info(f"**{r['med_name']}** &nbsp;|&nbsp; Patient: {r['patient_id']} &nbsp;|&nbsp; Dose: {r['dosage']} &nbsp;|&nbsp; Status: {r['status']}")
+                info(f"**{r['med_name']}** | Patient: {r['patient_id']} | Dose: {r['dosage']} | Status: {r['status']}")
                 st.markdown('<div class="form-wrapper">', unsafe_allow_html=True)
                 c1, c2 = st.columns(2, gap="large")
                 with c1:
                     u_dos  = st.text_input("Dosage", value=str(r['dosage'] or ""))
-                    u_freq = st.selectbox("Frequency", FREQUENCIES,
-                                          index=FREQUENCIES.index(r['frequency']) if r['frequency'] in FREQUENCIES else 0)
+                    u_freq = st.selectbox("Frequency", FREQUENCIES, index=FREQUENCIES.index(r['frequency']) if r['frequency'] in FREQUENCIES else 0)
                 with c2:
-                    u_end  = st.date_input("End Date",
-                                           value=datetime.strptime(str(r['end_date']),"%Y-%m-%d").date() if r['end_date'] else date.today()+timedelta(30))
-                    u_stat = st.selectbox("Status", MED_STATUS,
-                                          index=MED_STATUS.index(r['status']) if r['status'] in MED_STATUS else 0)
+                    u_end  = st.date_input("End Date", value=datetime.strptime(str(r['end_date']),"%Y-%m-%d").date() if r['end_date'] else date.today()+timedelta(30))
+                    u_stat = st.selectbox("Status", MED_STATUS, index=MED_STATUS.index(r['status']) if r['status'] in MED_STATUS else 0)
                 u_inst = st.text_area("Instructions", value=str(r['instructions'] or ""), height=80)
                 st.markdown('</div>', unsafe_allow_html=True)
                 if st.button("💾  Update Medication", type="primary", use_container_width=True):
-                    sql = f"""UPDATE {TBL('medications')} SET
-                        dosage='{esc(u_dos)}', frequency='{u_freq}', end_date='{u_end}',
-                        status='{u_stat}', instructions='{esc(u_inst)}'
-                        WHERE med_id='{esc(upd_id.strip())}'"""
+                    sql = f"""UPDATE {TBL('medications')} SET dosage='{esc(u_dos)}',
+                        frequency='{u_freq}',end_date='{u_end}',
+                        status='{u_stat}',instructions='{esc(u_inst)}'
+                        WHERE med_id='{esc(upd.strip())}'"""
                     if qrun(sql): ok("Medication updated!")
-            else:
-                err(f"Medication `{upd_id.strip()}` not found.")
+            else: err(f"Medication `{upd.strip()}` not found.")
 
     with tab_d:
         del_id = st.text_input("Enter Medication ID to delete")
@@ -695,9 +659,8 @@ elif "Medications" in page:
             df = qdf(f"SELECT * FROM {TBL('medications')} WHERE med_id='{esc(del_id.strip())}' LIMIT 1")
             if not df.empty:
                 r = df.iloc[0]
-                info(f"**{r['med_name']}** {r['dosage']} &nbsp;|&nbsp; Patient: {r['patient_id']} &nbsp;|&nbsp; Status: {r['status']}")
+                info(f"**{r['med_name']}** {r['dosage']} | Patient: {r['patient_id']} | Status: {r['status']}")
                 if st.button("🗑️  Delete Medication", type="primary", use_container_width=True):
                     if qrun(f"DELETE FROM {TBL('medications')} WHERE med_id='{esc(del_id.strip())}'"):
                         ok(f"Medication `{del_id.strip()}` deleted.")
-            else:
-                err(f"Medication `{del_id.strip()}` not found.")
+            else: err(f"Medication `{del_id.strip()}` not found.")
