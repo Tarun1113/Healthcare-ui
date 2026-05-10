@@ -1,0 +1,19 @@
+command:
+  - streamlit
+  - run
+  - app.py
+  - --server.port=8080
+  - --server.address=0.0.0.0
+  - --server.headless=true
+  - --server.enableCORS=false
+  - --server.enableXsrfProtection=false
+
+env:
+  - name: DATABRICKS_HTTP_PATH
+    value: "/sql/1.0/warehouses/f49f458f601125c6"
+
+  - name: DATABRICKS_CATALOG
+    value: "workspace"
+
+  - name: DATABRICKS_SCHEMA
+    value: "healthcare_db"
