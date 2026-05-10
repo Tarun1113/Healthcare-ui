@@ -1,0 +1,22 @@
+command:
+  - streamlit
+  - run
+  - app.py
+  - --server.port=8080
+  - --server.address=0.0.0.0
+  - --server.headless=true
+  - --server.enableCORS=false
+  - --server.enableXsrfProtection=false
+
+env:
+  # ── Paste your SQL Warehouse HTTP Path below ──────────────────────────────
+  # SQL Warehouses → your warehouse → Connection details → HTTP path
+  - name: DATABRICKS_HTTP_PATH
+    value: "/sql/1.0/warehouses/PASTE_YOUR_PATH_HERE"
+
+  # Your actual catalog (confirmed from SHOW CATALOGS)
+  - name: DATABRICKS_CATALOG
+    value: "workspace"
+
+  - name: DATABRICKS_SCHEMA
+    value: "healthcare_db"
