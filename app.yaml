@@ -12,7 +12,7 @@ env:
   # ── Paste your SQL Warehouse HTTP Path below ──────────────────────────────
   # SQL Warehouses → your warehouse → Connection details → HTTP path
   - name: DATABRICKS_HTTP_PATH
-    value: "/sql/1.0/warehouses/PASTE_YOUR_PATH_HERE"
+    value: "/sql/1.0/warehouses/f49f458f601125c6"
 
   # Your actual catalog (confirmed from SHOW CATALOGS)
   - name: DATABRICKS_CATALOG
